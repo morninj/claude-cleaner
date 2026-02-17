@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Claude Cleaner",
+  "version": "1.0",
+  "description": "Remove your Claude chat history",
+  "permissions": [],
+  "content_scripts": [
+    {
+      "matches": ["https://claude.ai/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
