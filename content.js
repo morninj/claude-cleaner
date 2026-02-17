@@ -26,18 +26,27 @@
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  function setStatus(text) {
-    const btn = document.getElementById("claude-cleaner-btn");
-    if (!btn) return;
-    const span = btn.querySelector(".claude-cleaner-label");
-    if (span) span.textContent = text;
+  function showOverlay(text) {
+    let overlay = document.getElementById("claude-cleaner-overlay");
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.id = "claude-cleaner-overlay";
+      overlay.innerHTML = '<div class="claude-cleaner-overlay-icon">' + TRASH_SVG + '</div><div class="claude-cleaner-overlay-spinner"></div><div class="claude-cleaner-overlay-text"></div>';
+      document.body.appendChild(overlay);
+    }
+    overlay.querySelector(".claude-cleaner-overlay-text").textContent = text;
+    overlay.style.display = "flex";
   }
 
-  function setSpinner(on) {
-    const btn = document.getElementById("claude-cleaner-btn");
-    if (!btn) return;
-    const spinner = btn.querySelector(".claude-cleaner-spinner");
-    if (spinner) spinner.style.display = on ? "inline-block" : "none";
+  function updateOverlay(text) {
+    const overlay = document.getElementById("claude-cleaner-overlay");
+    if (!overlay) return;
+    overlay.querySelector(".claude-cleaner-overlay-text").textContent = text;
+  }
+
+  function hideOverlay() {
+    const overlay = document.getElementById("claude-cleaner-overlay");
+    if (overlay) overlay.style.display = "none";
   }
 
 
@@ -53,7 +62,7 @@
   }
 
   async function expandAll() {
-    setStatus("Expanding...");
+    updateOverlay("Expanding...");
 
     while (clickShowMore()) {
       await sleep(1200);
@@ -79,7 +88,7 @@
       selectAllLabel.click();
       await sleep(500);
     } else {
-      setStatus("Selecting chats...");
+      updateOverlay("Selecting chats...");
 
       const chatLabels = labels.filter((label) => {
         const span = label.querySelector("span");
@@ -103,10 +112,10 @@
     }
 
     if (deleteBtn) {
-      setStatus("Deleting...");
+      hideOverlay();
       deleteBtn.click();
     } else {
-      setStatus("Delete button not found");
+      updateOverlay("Delete button not found");
     }
   }
 
@@ -119,22 +128,14 @@
       return;
     }
 
-    const btn = document.getElementById("claude-cleaner-btn");
-    if (btn) {
-      btn.disabled = true;
-      btn.style.opacity = "0.7";
-      setSpinner(true);
-    }
+    showOverlay("Starting...");
 
     try {
       // Check if there are any chats
       const chatItems = document.querySelectorAll('li [data-dd-action-name="conversation-cell"]');
       if (chatItems.length === 0) {
-        if (btn) {
-          setSpinner(false);
-          setStatus("No chats to delete");
-          setTimeout(() => setStatus(DEFAULT_LABEL), 3000);
-        }
+        updateOverlay("No chats to delete");
+        setTimeout(hideOverlay, 2000);
         return;
       }
 
@@ -143,11 +144,10 @@
       await sleep(500);
 
       // Step 2: select all
-      setStatus("Selecting all...");
-
+      updateOverlay("Selecting all...");
       await selectAllChats();
 
-      // Step 3: delete
+      // Step 3: delete (hideOverlay is called inside clickDelete before clicking)
       await clickDelete();
 
       // Wait for chats to actually be deleted before declaring done
@@ -157,33 +157,24 @@
       while (Date.now() - start < maxWait) {
         await sleep(500);
         const remaining = document.querySelectorAll('li [data-dd-action-name="conversation-cell"]');
-        if (remaining.length === 0) {
+        const zeroChatsMsg = Array.from(document.querySelectorAll("p, span, div")).find(
+          (el) => /^0\s+chats?\b/.test(el.textContent.trim())
+        );
+        if (remaining.length === 0 || zeroChatsMsg) {
           deleted = true;
           break;
         }
       }
 
-      if (btn) {
-        setSpinner(false);
-        setStatus(deleted ? "Done!" : DEFAULT_LABEL);
-      }
-      // Refresh to clear stale UI only if chats were actually deleted
       if (deleted) {
-        setTimeout(() => window.location.reload(), 1000);
+        showOverlay("Done!");
+        setTimeout(() => { window.location.href = "/recents"; }, 1000);
       }
 
     } catch (err) {
-      if (btn) {
-        setSpinner(false);
-        setStatus("Error!");
-      }
-
+      updateOverlay("Error!");
+      setTimeout(hideOverlay, 2000);
       console.error("Claude Cleaner error:", err);
-    } finally {
-      if (btn) {
-        btn.disabled = false;
-        btn.style.opacity = "1";
-      }
     }
   }
 
@@ -202,18 +193,7 @@
     btn.style.cssText =
       "background:#dc2626;color:#fff;border:none;height:38px;padding:0 16px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-right:15px;position:relative;top:-4px;display:inline-flex;align-items:center;gap:8px;";
     btn.addEventListener("click", deleteAllChats);
-
-    const spinner = document.createElement("span");
-    spinner.className = "claude-cleaner-spinner";
-    spinner.style.cssText =
-      "display:none;width:14px;height:14px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:claude-cleaner-spin 0.6s linear infinite;";
-
-    const label = document.createElement("span");
-    label.className = "claude-cleaner-label";
-    label.textContent = DEFAULT_LABEL;
-
-    btn.appendChild(spinner);
-    btn.appendChild(label);
+    btn.textContent = DEFAULT_LABEL;
 
     headerContainer.insertBefore(btn, newChatLink);
   }
@@ -269,6 +249,25 @@
     style.textContent = `
       @keyframes claude-cleaner-spin{to{transform:rotate(360deg)}}
       #claude-cleaner-sidebar a:hover{background:rgba(220,38,38,0.18)!important}
+      #claude-cleaner-overlay{
+        position:fixed;inset:0;z-index:9999;
+        background:rgba(0,0,0,0.6);
+        display:none;flex-direction:column;align-items:center;justify-content:center;gap:16px;
+      }
+      .claude-cleaner-overlay-icon{
+        color:#fff;margin-bottom:4px;
+      }
+      .claude-cleaner-overlay-icon svg{
+        width:48px;height:48px;
+      }
+      .claude-cleaner-overlay-spinner{
+        width:32px;height:32px;
+        border:3px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;
+        animation:claude-cleaner-spin 0.6s linear infinite;
+      }
+      .claude-cleaner-overlay-text{
+        color:#fff;font-size:18px;font-weight:600;
+      }
     `;
     document.head.appendChild(style);
   }
