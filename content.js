@@ -107,7 +107,6 @@
       deleteBtn.click();
     } else {
       setStatus("Delete button not found");
-
     }
   }
 
@@ -151,12 +150,27 @@
       // Step 3: delete
       await clickDelete();
 
+      // Wait for chats to actually be deleted before declaring done
+      const maxWait = 30000;
+      const start = Date.now();
+      let deleted = false;
+      while (Date.now() - start < maxWait) {
+        await sleep(500);
+        const remaining = document.querySelectorAll('li [data-dd-action-name="conversation-cell"]');
+        if (remaining.length === 0) {
+          deleted = true;
+          break;
+        }
+      }
+
       if (btn) {
         setSpinner(false);
-        setStatus("Done!");
+        setStatus(deleted ? "Done!" : DEFAULT_LABEL);
       }
-      // Refresh to clear stale UI
-      setTimeout(() => window.location.reload(), 2000);
+      // Refresh to clear stale UI only if chats were actually deleted
+      if (deleted) {
+        setTimeout(() => window.location.reload(), 1000);
+      }
 
     } catch (err) {
       if (btn) {
