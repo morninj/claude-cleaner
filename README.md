@@ -11,6 +11,7 @@ Install from the [Chrome Web Store](#).
 - Adds a **Delete all chats** button to the header on the Recents page
 - Adds a sidebar link accessible from any page
 - Expands all chats, selects them, and deletes them in one click
+- Option to **keep starred chats** while deleting everything else (default behavior)
 
 ## Development
 

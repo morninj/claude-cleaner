@@ -1,0 +1,18 @@
+Delete your entire Claude chat history with one click. Claude Cleaner adds a "Delete all chats" button to claude.ai's sidebar and chat history page.
+
+Features:
+- One-click bulk deletion of all your Claude conversations
+- Keep starred chats while deleting everything else (default)
+- Accessible from the sidebar on any page or from the Chats page header
+- Automatically expands and selects all chats for deletion
+- Progress overlay shows real-time status during deletion
+- Lightweight, no permissions required
+
+How it works:
+1. Click "Delete all chats" in the sidebar or on the Chats page
+2. Choose "Keep starred chats" (default) to preserve important conversations, or "Delete all including starred" to remove everything
+3. Confirm the deletion when prompted
+
+Starred chats are detected from the sidebar, so any conversation you've starred will be safely excluded by default.
+
+Note: This extension only works on claude.ai.
