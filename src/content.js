@@ -95,24 +95,48 @@
     }
   }
 
-  function readStarredFromSidebar() {
-    const headings = document.querySelectorAll("h2");
-    for (const h2 of headings) {
-      if (h2.textContent.trim() === "Starred") {
-        const ids = new Set();
-        const container = h2.parentElement;
-        if (container) {
-          const links = container.querySelectorAll('a[href*="/chat/"]');
-          for (const link of links) {
-            const href = link.getAttribute("href");
-            const match = href && href.match(/\/chat\/([^/?#]+)/);
-            if (match) ids.add(match[1]);
-          }
-        }
-        return ids;
-      }
+  function findStarredHeading() {
+    // Match the inner label span (not the h2's textContent, which may include
+    // hidden glyph characters from icon fonts that break exact-text matches).
+    const spans = document.querySelectorAll("h2 span, h3 span");
+    for (const span of spans) {
+      if (span.textContent.trim() === "Starred") return span;
+    }
+    // Fallback: old layout used h2 textContent directly.
+    const headings = document.querySelectorAll("h2, h3");
+    for (const h of headings) {
+      if (h.textContent.trim() === "Starred") return h;
     }
     return null;
+  }
+
+  function readStarredFromSidebar() {
+    const heading = findStarredHeading();
+    if (!heading) return null;
+
+    // Walk up from the heading until we find an ancestor containing chat links.
+    // Stop before reaching nav/body so we don't accidentally grab every chat in
+    // the sidebar.
+    let container = heading.parentElement;
+    while (container) {
+      if (container.tagName === "NAV" || container.tagName === "BODY") {
+        container = null;
+        break;
+      }
+      if (container.querySelector('a[href*="/chat/"]')) break;
+      container = container.parentElement;
+    }
+
+    const ids = new Set();
+    if (container) {
+      const links = container.querySelectorAll('a[href*="/chat/"]');
+      for (const link of links) {
+        const href = link.getAttribute("href");
+        const match = href && href.match(/\/chat\/([^/?#]+)/);
+        if (match) ids.add(match[1]);
+      }
+    }
+    return ids;
   }
 
   async function getStarredChatIds() {
@@ -123,7 +147,27 @@
     return ids || new Set();
   }
 
-  // --- "Show more" expansion ---
+  // --- chat row helpers ---
+
+  function getChatRows() {
+    return Array.from(document.querySelectorAll("tr")).filter((tr) =>
+      tr.querySelector('a[data-primary="true"][href*="/chat/"]')
+    );
+  }
+
+  function getChatLink(row) {
+    return row.querySelector('a[data-primary="true"][href*="/chat/"]');
+  }
+
+  function getRowCheckbox(row) {
+    return row.querySelector('button[role="checkbox"]');
+  }
+
+  function getChatItemCount() {
+    return document.querySelectorAll('a[data-primary="true"][href*="/chat/"]').length;
+  }
+
+  // --- "Show more" / scroll expansion ---
 
   function clickShowMore() {
     const btn = findButtonByText("Show more");
@@ -134,58 +178,62 @@
     return false;
   }
 
+  async function scrollLoadMore() {
+    const before = getChatItemCount();
+    window.scrollTo(0, document.body.scrollHeight);
+    await sleep(800);
+    return getChatItemCount() > before;
+  }
+
   async function expandAll() {
     updateOverlay("Expanding...");
 
-    while (clickShowMore()) {
-      await sleep(1200);
+    while (true) {
+      if (clickShowMore()) {
+        await sleep(1200);
+        continue;
+      }
+      const loadedMore = await scrollLoadMore();
+      if (!loadedMore) break;
     }
   }
 
   // --- selection & deletion ---
 
-  async function selectAllChats() {
-    const selectBtn = findLinkByText("Select");
+  async function enterSelectionMode() {
+    const selectBtn = findLinkByText("Select chats") || findLinkByText("Select");
     if (selectBtn) {
       selectBtn.click();
-      await sleep(500);
-    }
-
-    const labels = Array.from(document.querySelectorAll("label"));
-    const selectAllLabel = labels.find((label) => {
-      const span = label.querySelector("span");
-      return span && span.textContent.trim() === "Select all";
-    });
-
-    if (selectAllLabel) {
-      selectAllLabel.click();
-      await sleep(500);
-    } else {
-      updateOverlay("Selecting chats...");
-
-      const chatLabels = labels.filter((label) => {
-        const span = label.querySelector("span");
-        return span && span.textContent.trim() === "Select chat";
-      });
-      for (const label of chatLabels) {
-        label.click();
-      }
       await sleep(500);
     }
   }
 
-  async function selectNonStarredChats(starredIds) {
-    const selectBtn = findLinkByText("Select");
-    if (selectBtn) {
-      selectBtn.click();
+  async function selectAllChats() {
+    await enterSelectionMode();
+
+    const selectAllBtn = findLinkByText("Select all");
+    if (selectAllBtn) {
+      selectAllBtn.click();
       await sleep(500);
+      return;
     }
 
-    let selectedCount = 0;
-    const chatRows = document.querySelectorAll("li");
+    updateOverlay("Selecting chats...");
+    for (const row of getChatRows()) {
+      const cb = getRowCheckbox(row);
+      if (cb && cb.getAttribute("aria-checked") !== "true") {
+        cb.click();
+      }
+    }
+    await sleep(500);
+  }
 
-    for (const li of chatRows) {
-      const link = li.querySelector('a[data-dd-action-name="conversation-cell"]');
+  async function selectNonStarredChats(starredIds) {
+    await enterSelectionMode();
+
+    let selectedCount = 0;
+    for (const row of getChatRows()) {
+      const link = getChatLink(row);
       if (!link) continue;
 
       const href = link.getAttribute("href");
@@ -195,9 +243,9 @@
       const chatId = match[1];
       if (starredIds.has(chatId)) continue;
 
-      const label = li.querySelector("label");
-      if (label) {
-        label.click();
+      const cb = getRowCheckbox(row);
+      if (cb && cb.getAttribute("aria-checked") !== "true") {
+        cb.click();
         selectedCount++;
       }
     }
@@ -251,8 +299,7 @@
 
     try {
       // Check if there are any chats
-      const chatItems = document.querySelectorAll('li [data-dd-action-name="conversation-cell"]');
-      if (chatItems.length === 0) {
+      if (getChatItemCount() === 0) {
         updateOverlay("No chats to delete");
         setTimeout(hideOverlay, 2000);
         return;
@@ -296,8 +343,7 @@
       let deleted = false;
       while (Date.now() - start < maxWait) {
         await sleep(500);
-        const remaining = document.querySelectorAll('li [data-dd-action-name="conversation-cell"]');
-        if (remaining.length <= expectedRemaining) {
+        if (getChatItemCount() <= expectedRemaining) {
           deleted = true;
           break;
         }
@@ -334,13 +380,39 @@
     if (!newChatLink) return;
     const headerContainer = newChatLink.parentElement;
 
+    // Clone the structure of a sibling button (e.g., "Select chats") so we
+    // inherit Claude's current sizing, font, and layout classes.
+    const templates = headerContainer.querySelectorAll(
+      'button[data-cds="Button"], a[data-cds="Button"]'
+    );
+    const template = Array.from(templates).find((el) => el !== newChatLink);
+
     const btn = document.createElement("button");
     btn.id = "claude-cleaner-btn";
-    btn.style.cssText =
-      "background:rgb(221,83,83);color:#fff;border:none;height:38px;padding:0 16px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-right:15px;position:relative;top:-4px;display:inline-flex;align-items:center;gap:8px;";
-    btn.addEventListener("click", () => deleteAllChats());
-    btn.textContent = "Delete all chats";
+    btn.type = "button";
 
+    if (template) {
+      btn.setAttribute("data-cds", "Button");
+      btn.className = template.className;
+
+      const templateBg = template.querySelector('span[aria-hidden="true"]');
+      const bgSpan = document.createElement("span");
+      bgSpan.setAttribute("aria-hidden", "true");
+      if (templateBg) bgSpan.className = templateBg.className;
+      btn.appendChild(bgSpan);
+
+      const contentSpan = document.createElement("span");
+      contentSpan.className = "inline-flex items-center gap-1";
+      contentSpan.textContent = "Delete all chats";
+      btn.appendChild(contentSpan);
+    } else {
+      // Fallback if no sibling button is found
+      btn.style.cssText =
+        "background:rgb(221,83,83);color:#fff;border:none;height:36px;padding:0 14px;border-radius:6px;font-family:inherit;font-size:14px;font-weight:510;cursor:pointer;display:inline-flex;align-items:center;gap:4px;";
+      btn.textContent = "Delete all chats";
+    }
+
+    btn.addEventListener("click", () => deleteAllChats());
     headerContainer.insertBefore(btn, newChatLink);
   }
 
@@ -394,6 +466,9 @@
     style.id = "claude-cleaner-style";
     style.textContent = `
       @keyframes claude-cleaner-spin{to{transform:rotate(360deg)}}
+      #claude-cleaner-btn{color:#fff!important}
+      #claude-cleaner-btn > span[aria-hidden="true"]{background:rgb(221,83,83)!important;box-shadow:none!important}
+      #claude-cleaner-btn:hover > span[aria-hidden="true"]{background:rgb(200,70,70)!important}
       #claude-cleaner-sidebar a:hover{background:rgba(220,38,38,0.18)!important}
       #claude-cleaner-overlay{
         position:fixed;inset:0;z-index:9999;
