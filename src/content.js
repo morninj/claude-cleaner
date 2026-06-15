@@ -80,6 +80,110 @@
     });
   }
 
+  // --- post-deletion feedback ---
+
+  const REVIEW_URL =
+    "https://chromewebstore.google.com/detail/claude-cleaner/bphidkhnddpnpnmmbiignjmddficacpi/reviews?hl=en";
+  const FEEDBACK_EMAIL = "joe@mornin.org";
+  const FEEDBACK_OPTOUT_KEY = "claude-cleaner-no-feedback";
+
+  function feedbackOptedOut() {
+    try {
+      return localStorage.getItem(FEEDBACK_OPTOUT_KEY) === "1";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function setFeedbackOptOut() {
+    try {
+      localStorage.setItem(FEEDBACK_OPTOUT_KEY, "1");
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  function showFeedbackDialog() {
+    if (feedbackOptedOut()) return;
+    if (document.getElementById("claude-cleaner-feedback")) return;
+
+    const overlay = document.createElement("div");
+    overlay.id = "claude-cleaner-feedback";
+    const close = () => overlay.remove();
+
+    const renderAsk = () => {
+      overlay.innerHTML = `
+        <div class="claude-cleaner-choice-box">
+          <div class="claude-cleaner-choice-title">Did Claude Cleaner work well?</div>
+          <button class="claude-cleaner-choice-btn claude-cleaner-fb-yes">Yes, it worked</button>
+          <button class="claude-cleaner-choice-btn claude-cleaner-fb-no">Not really</button>
+          <a href="#" class="claude-cleaner-fb-dismiss">Don't ask again</a>
+        </div>`;
+      overlay.querySelector(".claude-cleaner-fb-yes").addEventListener("click", renderYes);
+      overlay.querySelector(".claude-cleaner-fb-no").addEventListener("click", renderNo);
+      overlay.querySelector(".claude-cleaner-fb-dismiss").addEventListener("click", (e) => {
+        e.preventDefault();
+        setFeedbackOptOut();
+        close();
+      });
+    };
+
+    const renderYes = () => {
+      overlay.innerHTML = `
+        <div class="claude-cleaner-choice-box">
+          <div class="claude-cleaner-choice-title">Glad to hear it! 🎉</div>
+          <div class="claude-cleaner-fb-text">A quick review on the Chrome Web Store really helps.</div>
+          <a class="claude-cleaner-choice-btn claude-cleaner-fb-primary" href="${REVIEW_URL}" target="_blank" rel="noopener noreferrer">Leave a review</a>
+          <button class="claude-cleaner-choice-btn claude-cleaner-choice-cancel claude-cleaner-fb-close">No thanks</button>
+        </div>`;
+      overlay.querySelector(".claude-cleaner-fb-primary").addEventListener("click", () => setTimeout(close, 150));
+      overlay.querySelector(".claude-cleaner-fb-close").addEventListener("click", close);
+    };
+
+    const renderNo = () => {
+      const mailto =
+        "mailto:" + FEEDBACK_EMAIL + "?subject=" + encodeURIComponent("Claude Cleaner feedback");
+      overlay.innerHTML = `
+        <div class="claude-cleaner-choice-box">
+          <div class="claude-cleaner-choice-title">Sorry about that.</div>
+          <div class="claude-cleaner-fb-text">Tell me what went wrong and I'll try to fix it.</div>
+          <a class="claude-cleaner-choice-btn claude-cleaner-fb-primary" href="${mailto}">Send feedback</a>
+          <button class="claude-cleaner-choice-btn claude-cleaner-choice-cancel claude-cleaner-fb-close">Close</button>
+        </div>`;
+      overlay.querySelector(".claude-cleaner-fb-primary").addEventListener("click", () => setTimeout(close, 150));
+      overlay.querySelector(".claude-cleaner-fb-close").addEventListener("click", close);
+    };
+
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+
+    renderAsk();
+    document.body.appendChild(overlay);
+  }
+
+  // After the user confirms the native dialog(s), wait for the chats to
+  // actually disappear, then ask for feedback. If the deletion is cancelled or
+  // never completes, this quietly times out without prompting.
+  async function watchForDeletionThenAskFeedback(expectedRemaining) {
+    if (feedbackOptedOut()) return;
+
+    const maxWait = 5 * 60 * 1000;
+    const start = Date.now();
+    while (Date.now() - start < maxWait) {
+      await sleep(1000);
+      if (window.location.pathname !== "/recents") return;
+      if (getChatItemCount() <= expectedRemaining) {
+        // Let the list settle, then confirm it really stuck before prompting.
+        await sleep(1000);
+        if (getChatItemCount() <= expectedRemaining) {
+          showFeedbackDialog();
+          return;
+        }
+      }
+    }
+  }
+
   // --- sidebar / starred detection ---
 
   function isSidebarOpen() {
@@ -345,6 +449,10 @@
       // who confirms the deletion themselves.
       await deleteSelected();
 
+      // Step 4: once the deletion actually completes, ask for feedback.
+      const expectedRemaining = keepStarred ? starredIds.size : 0;
+      await watchForDeletionThenAskFeedback(expectedRemaining);
+
     } catch (err) {
       updateOverlay("Error!");
       setTimeout(hideOverlay, 2000);
@@ -497,6 +605,27 @@
         background:transparent;color:#999;border:1px solid #444;
       }
       .claude-cleaner-choice-cancel:hover{color:#ccc;border-color:#666}
+      #claude-cleaner-feedback{
+        position:fixed;inset:0;z-index:2147483647;
+        background:rgba(0,0,0,0.6);
+        display:flex;align-items:center;justify-content:center;
+      }
+      .claude-cleaner-fb-text{
+        color:#bbb;font-size:13px;line-height:1.4;text-align:center;margin-bottom:4px;
+      }
+      .claude-cleaner-fb-primary{
+        background:rgb(221,83,83);color:#fff;text-align:center;text-decoration:none;display:block;
+      }
+      .claude-cleaner-fb-yes{
+        background:rgb(221,83,83);color:#fff;
+      }
+      .claude-cleaner-fb-no{
+        background:#3a3a3a;color:#eee;
+      }
+      .claude-cleaner-fb-dismiss{
+        color:#888;font-size:12px;text-align:center;text-decoration:none;margin-top:4px;
+      }
+      .claude-cleaner-fb-dismiss:hover{color:#aaa;text-decoration:underline}
     `;
     document.head.appendChild(style);
   }
