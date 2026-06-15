@@ -445,9 +445,7 @@
     link.innerHTML = `
       <div class="-translate-x-2 w-full flex flex-row items-center justify-start gap-3">
         <div class="flex items-center justify-center text-text-100">
-          <div style="width:16px;height:16px;display:flex;align-items:center;justify-content:center">
-            ${TRASH_SVG}
-          </div>
+          ${TRASH_SVG}
         </div>
         <span class="truncate text-sm whitespace-nowrap flex-1">
           <div class="claude-cleaner-sidebar-label">Delete all chats</div>
