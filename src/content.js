@@ -95,17 +95,17 @@
     }
   }
 
+  function headingText(h) {
+    // Prefer the inner label span (the h2/h3's textContent may include hidden
+    // glyph characters from icon fonts that break exact-text matches).
+    const label = h.querySelector("span.truncate") || h.querySelector("span") || h;
+    return label.textContent.trim();
+  }
+
   function findStarredHeading() {
-    // Match the inner label span (not the h2's textContent, which may include
-    // hidden glyph characters from icon fonts that break exact-text matches).
-    const spans = document.querySelectorAll("h2 span, h3 span");
-    for (const span of spans) {
-      if (span.textContent.trim() === "Starred") return span;
-    }
-    // Fallback: old layout used h2 textContent directly.
     const headings = document.querySelectorAll("h2, h3");
     for (const h of headings) {
-      if (h.textContent.trim() === "Starred") return h;
+      if (headingText(h) === "Starred") return h;
     }
     return null;
   }
@@ -114,9 +114,11 @@
     const heading = findStarredHeading();
     if (!heading) return null;
 
-    // Walk up from the heading until we find an ancestor containing chat links.
-    // Stop before reaching nav/body so we don't accidentally grab every chat in
-    // the sidebar.
+    // Walk up from the heading to the section wrapper that holds the starred
+    // chat links (the heading and its <ul> of links live in the same section
+    // div). Stop at the first ancestor containing chat links so we capture the
+    // Starred section only, not the whole sidebar nav (which also holds
+    // Recents). Bail before reaching nav/body.
     let container = heading.parentElement;
     while (container) {
       if (container.tagName === "NAV" || container.tagName === "BODY") {
@@ -129,8 +131,7 @@
 
     const ids = new Set();
     if (container) {
-      const links = container.querySelectorAll('a[href*="/chat/"]');
-      for (const link of links) {
+      for (const link of container.querySelectorAll('a[href*="/chat/"]')) {
         const href = link.getAttribute("href");
         const match = href && href.match(/\/chat\/([^/?#]+)/);
         if (match) ids.add(match[1]);
@@ -160,7 +161,7 @@
   }
 
   function getRowCheckbox(row) {
-    return row.querySelector('button[role="checkbox"]');
+    return row.querySelector('[role="checkbox"]');
   }
 
   function getChatItemCount() {
@@ -254,22 +255,29 @@
     return selectedCount;
   }
 
-  async function clickDelete() {
-    let deleteBtn = document.querySelector('button[aria-label^="Delete"][aria-label*="selected"]');
+  function findToolbarDeleteButton() {
+    return (
+      document.querySelector('button[aria-label^="Delete"][aria-label*="selected"]') ||
+      findButtonByText("Delete") ||
+      null
+    );
+  }
 
-    if (!deleteBtn) {
-      deleteBtn =
-        findButtonByAriaLabel("Delete") ||
-        findButtonByAriaLabel("Delete selected") ||
-        findButtonByText("Delete");
-    }
-
-    if (deleteBtn) {
-      hideOverlay();
-      deleteBtn.click();
-    } else {
+  // Open Claude's native delete confirmation for the current selection, then
+  // hand off to the user. The extension does the tedious part (expanding and
+  // selecting the right chats) but the actual destructive confirmation is left
+  // for the user to click.
+  async function deleteSelected() {
+    const toolbarDelete = findToolbarDeleteButton();
+    if (!toolbarDelete) {
       updateOverlay("Delete button not found");
+      await sleep(2000);
+      return false;
     }
+    // Reveal the native confirmation dialog and step out of the way.
+    hideOverlay();
+    toolbarDelete.click();
+    return true;
   }
 
   // --- main flow ---
@@ -333,35 +341,9 @@
         await selectAllChats();
       }
 
-      // Step 3: delete (hideOverlay is called inside clickDelete before clicking)
-      await clickDelete();
-
-      // Wait for chats to actually be deleted before declaring done
-      const expectedRemaining = keepStarred ? starredIds.size : 0;
-      const maxWait = 30000;
-      const start = Date.now();
-      let deleted = false;
-      while (Date.now() - start < maxWait) {
-        await sleep(500);
-        if (getChatItemCount() <= expectedRemaining) {
-          deleted = true;
-          break;
-        }
-        if (!keepStarred) {
-          const zeroChatsMsg = Array.from(document.querySelectorAll("p, span, div")).find(
-            (el) => /^0\s+chats?\b/.test(el.textContent.trim())
-          );
-          if (zeroChatsMsg) {
-            deleted = true;
-            break;
-          }
-        }
-      }
-
-      if (deleted) {
-        showOverlay("Done!");
-        setTimeout(() => { window.location.href = "/recents"; }, 1000);
-      }
+      // Step 3: open Claude's native confirmation and hand off to the user,
+      // who confirms the deletion themselves.
+      await deleteSelected();
 
     } catch (err) {
       updateOverlay("Error!");
@@ -469,8 +451,8 @@
       #claude-cleaner-btn:hover > span[aria-hidden="true"]{background:rgb(200,70,70)!important}
       #claude-cleaner-sidebar a:hover{background:rgba(220,38,38,0.18)!important}
       #claude-cleaner-overlay{
-        position:fixed;inset:0;z-index:9999;
-        background:rgba(0,0,0,0.6);
+        position:fixed;inset:0;z-index:2147483647;
+        background:rgba(15,15,15,0.97);
         display:none;flex-direction:column;align-items:center;justify-content:center;gap:16px;
       }
       .claude-cleaner-overlay-icon{
