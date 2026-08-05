@@ -25,6 +25,37 @@
     return new Promise((r) => setTimeout(r, ms));
   }
 
+  // --- interface / page detection ---
+  //
+  // Claude is rolling out a redesign gradually. The older interface lives at
+  // /recents and labels favourite chats "Starred"; the newer one lives at
+  // /chats and labels them "Pinned". Both must keep working, so anything that
+  // depends on a specific URL or label is handled through these helpers.
+
+  const CHAT_LIST_PATHS = ["/chats", "/recents"];
+
+  function onChatListPage() {
+    return CHAT_LIST_PATHS.includes(window.location.pathname);
+  }
+
+  function isNewInterface() {
+    return (
+      !!document.querySelector("[data-sidebar-group-label]") ||
+      !!document.querySelector("button[data-row-main-button]") ||
+      !!document.querySelector('header[data-testid="page-header"]')
+    );
+  }
+
+  // Where the full, selectable chat list lives on the active interface.
+  function chatListPath() {
+    return isNewInterface() ? "/chats" : "/recents";
+  }
+
+  // The word Claude currently uses for favourited chats.
+  function pinnedTerm() {
+    return isNewInterface() ? "pinned" : "starred";
+  }
+
   // --- overlay ---
 
   function showOverlay(text) {
@@ -50,17 +81,33 @@
     if (overlay) overlay.style.display = "none";
   }
 
+  // Prominent, reassuring message shown once Claude actually starts deleting.
+  // Bulk deletion can take a long time and occasionally stalls, so we tell the
+  // user to sit tight and how to recover if it looks stuck.
+  function showDeletionUnderway() {
+    showOverlay("");
+    const overlay = document.getElementById("claude-cleaner-overlay");
+    if (!overlay) return;
+    overlay.querySelector(".claude-cleaner-overlay-text").innerHTML =
+      'Deletion is underway&hellip;' +
+      '<div class="claude-cleaner-overlay-sub">' +
+      '<p>This can take a while. Please be patient and keep this tab open.</p>' +
+      '<p>If it looks frozen, refresh the page and click &ldquo;Delete all chats&rdquo; again to pick up where it left off.</p>' +
+      '</div>';
+  }
+
   // --- choice dialog ---
 
   function showChoiceDialog() {
     return new Promise((resolve) => {
+      const term = pinnedTerm();
       const overlay = document.createElement("div");
       overlay.id = "claude-cleaner-choice";
       overlay.innerHTML = `
         <div class="claude-cleaner-choice-box">
           <div class="claude-cleaner-choice-title">Delete chats</div>
-          <button class="claude-cleaner-choice-btn claude-cleaner-choice-keep">Keep starred chats</button>
-          <button class="claude-cleaner-choice-btn claude-cleaner-choice-all">Delete all including starred</button>
+          <button class="claude-cleaner-choice-btn claude-cleaner-choice-keep">Keep ${term} chats</button>
+          <button class="claude-cleaner-choice-btn claude-cleaner-choice-all">Delete all including ${term}</button>
           <button class="claude-cleaner-choice-btn claude-cleaner-choice-cancel">Cancel</button>
         </div>`;
 
@@ -162,41 +209,81 @@
     document.body.appendChild(overlay);
   }
 
-  // After the user confirms the native dialog(s), wait for the chats to
-  // actually disappear, then ask for feedback. If the deletion is cancelled or
-  // never completes, this quietly times out without prompting.
-  async function watchForDeletionThenAskFeedback(expectedRemaining) {
-    if (feedbackOptedOut()) return;
-
-    const maxWait = 5 * 60 * 1000;
+  // After the user confirms the native dialog, watch the list. Once chats
+  // actually start disappearing we show a prominent "deletion underway" notice
+  // (bulk deletes are slow and can stall); once the list settles at the
+  // expected size we hide it and ask for feedback. If the user cancels the
+  // native dialog or navigates away, this quietly times out — and because the
+  // notice only appears after deletion has visibly begun, it never blocks the
+  // native confirmation dialog.
+  async function watchForDeletion(initialCount, expectedRemaining) {
+    const maxWait = 15 * 60 * 1000;
     const start = Date.now();
+    let underwayShown = false;
+
     while (Date.now() - start < maxWait) {
-      await sleep(1000);
-      if (window.location.pathname !== "/recents") return;
-      if (getChatItemCount() <= expectedRemaining) {
-        // Let the list settle, then confirm it really stuck before prompting.
-        await sleep(1000);
+      await sleep(700);
+
+      // User left the list page — stop watching and clean up our overlay.
+      if (!onChatListPage()) {
+        if (underwayShown) hideOverlay();
+        return;
+      }
+
+      const count = getChatItemCount();
+
+      if (!underwayShown && count < initialCount) {
+        showDeletionUnderway();
+        underwayShown = true;
+      }
+
+      if (underwayShown && count <= expectedRemaining) {
+        // Let the list settle, then confirm it really stuck before finishing.
+        await sleep(1200);
         if (getChatItemCount() <= expectedRemaining) {
+          hideOverlay();
           showFeedbackDialog();
           return;
         }
       }
     }
+
+    if (underwayShown) hideOverlay();
   }
 
   // --- sidebar / starred detection ---
 
   function isSidebarOpen() {
-    return !!document.querySelector('button[aria-label="Close sidebar"]');
+    // Newer interface uses "Collapse sidebar"; older uses "Close sidebar". As a
+    // fallback, the presence of a rendered section label means the sidebar's
+    // chat lists are expanded and readable regardless of the toggle's wording.
+    return (
+      !!document.querySelector(
+        'button[aria-label="Close sidebar"], button[aria-label="Collapse sidebar"]'
+      ) || !!document.querySelector("[data-sidebar-group-label]")
+    );
   }
 
   async function ensureSidebarOpen() {
     if (isSidebarOpen()) return;
-    const openBtn = document.querySelector('button[aria-label="Open sidebar"]');
+    const openBtn = document.querySelector(
+      'button[aria-label="Open sidebar"], button[aria-label="Expand sidebar"]'
+    );
     if (openBtn) {
       openBtn.click();
       await sleep(1000);
     }
+  }
+
+  // True when the sidebar's chat sections are actually rendered, so we can tell
+  // "no pinned chats exist" apart from "the sidebar isn't readable yet". This
+  // guards keep-pinned mode against deleting favourites we simply couldn't see.
+  function sidebarChatSectionsReadable() {
+    if (document.querySelector("[data-sidebar-group-label]")) return true;
+    const SECTIONS = new Set(["Recents", "Starred", "Pinned"]);
+    return Array.from(document.querySelectorAll("h2, h3")).some((h) =>
+      SECTIONS.has(headingText(h))
+    );
   }
 
   function headingText(h) {
@@ -207,9 +294,15 @@
   }
 
   function findStarredHeading() {
-    const headings = document.querySelectorAll("h2, h3");
-    for (const h of headings) {
-      if (headingText(h) === "Starred") return h;
+    // Newer interface: collapsible section label in [data-sidebar-group-label]
+    // reading "Pinned". Older interface: an <h2>/<h3> reading "Starred". Match
+    // either, and accept either label on either interface for resilience.
+    const NAMES = new Set(["Pinned", "Starred"]);
+    const candidates = document.querySelectorAll(
+      "[data-sidebar-group-label], h2, h3"
+    );
+    for (const el of candidates) {
+      if (NAMES.has(headingText(el))) return el;
     }
     return null;
   }
@@ -244,11 +337,16 @@
     return ids;
   }
 
+  // Returns the set of pinned/starred chat IDs, an empty set when there
+  // genuinely are none, or null when the sidebar can't be read (so callers can
+  // refuse to delete rather than risk wiping favourites they couldn't detect).
   async function getStarredChatIds() {
     if (!isSidebarOpen()) {
       await ensureSidebarOpen();
     }
+    if (!sidebarChatSectionsReadable()) return null;
     const ids = readStarredFromSidebar();
+    // Sections are readable but there's no Pinned/Starred section => none exist.
     return ids || new Set();
   }
 
@@ -400,10 +498,12 @@
     }
 
     const keepStarred = choice === "keep-starred";
+    const term = pinnedTerm();
 
-    // If not on /recents, navigate there
-    if (window.location.pathname !== "/recents") {
-      window.location.href = "/recents?claude-cleaner-autorun=" + choice;
+    // If not on the chat-list page, navigate to it (the right URL depends on
+    // which interface is active) and let the autorun handler resume there.
+    if (!onChatListPage()) {
+      window.location.href = chatListPath() + "?claude-cleaner-autorun=" + choice;
       return;
     }
 
@@ -420,9 +520,18 @@
       let starredIds = new Set();
 
       if (keepStarred) {
-        // Get starred chat IDs from sidebar before expanding
-        updateOverlay("Detecting starred chats...");
+        // Get pinned/starred chat IDs from the sidebar before expanding.
+        updateOverlay("Detecting " + term + " chats...");
         starredIds = await getStarredChatIds();
+
+        // Bail out rather than risk deleting favourites we couldn't detect.
+        if (starredIds === null) {
+          updateOverlay(
+            "Couldn't read your " + term + " chats. Open the sidebar, then try again."
+          );
+          setTimeout(hideOverlay, 4000);
+          return;
+        }
       }
 
       // Step 1: expand all chats
@@ -430,12 +539,12 @@
       await sleep(500);
 
       if (keepStarred) {
-        // Step 2: select only non-starred chats
-        updateOverlay("Selecting non-starred chats...");
+        // Step 2: select only the chats that aren't pinned/starred.
+        updateOverlay("Selecting chats to delete...");
         const selectedCount = await selectNonStarredChats(starredIds);
 
         if (selectedCount === 0) {
-          updateOverlay("No non-starred chats to delete");
+          updateOverlay("No chats to delete (all are " + term + ")");
           setTimeout(hideOverlay, 2000);
           return;
         }
@@ -445,13 +554,18 @@
         await selectAllChats();
       }
 
+      // Record how many chats exist right before deletion so the watcher can
+      // tell when the list actually starts shrinking.
+      const initialCount = getChatItemCount();
+
       // Step 3: open Claude's native confirmation and hand off to the user,
       // who confirms the deletion themselves.
       await deleteSelected();
 
-      // Step 4: once the deletion actually completes, ask for feedback.
+      // Step 4: show the "deletion underway" notice as chats disappear, then
+      // ask for feedback once the list settles.
       const expectedRemaining = keepStarred ? starredIds.size : 0;
-      await watchForDeletionThenAskFeedback(expectedRemaining);
+      await watchForDeletion(initialCount, expectedRemaining);
 
     } catch (err) {
       updateOverlay("Error!");
@@ -460,22 +574,29 @@
     }
   }
 
-  // --- inject header button (only on /recents) ---
+  // --- inject header button (only on the chat-list page) ---
 
   function injectButton() {
-    if (window.location.pathname !== "/recents") return;
+    if (!onChatListPage()) return;
     if (document.getElementById("claude-cleaner-btn")) return;
 
     const newChatLink = document.querySelector('header a[href="/new"]');
     if (!newChatLink) return;
     const headerContainer = newChatLink.parentElement;
 
-    // Clone the structure of a sibling button (e.g., "Select chats") so we
-    // inherit Claude's current sizing, font, and layout classes.
+    // Clone the structure of a sibling text button (e.g., "Select") so we
+    // inherit Claude's current sizing, font, and layout classes. Skip the New
+    // link and any icon-only square buttons (search), whose cramped shape would
+    // make our labelled button look wrong.
     const templates = headerContainer.querySelectorAll(
       'button[data-cds="Button"], a[data-cds="Button"]'
     );
-    const template = Array.from(templates).find((el) => el !== newChatLink);
+    const template = Array.from(templates).find(
+      (el) =>
+        el !== newChatLink &&
+        el.textContent.trim() !== "" &&
+        !el.className.includes("aspect-square")
+    );
 
     const btn = document.createElement("button");
     btn.id = "claude-cleaner-btn";
@@ -511,11 +632,60 @@
   function injectSidebar() {
     if (document.getElementById("claude-cleaner-sidebar")) return;
 
-    // Find the sidebar nav item container (the div with Chats, Projects, etc.)
-    const chatsLink = document.querySelector('nav[aria-label="Sidebar"] a[aria-label="Chats"]');
-    if (!chatsLink) return;
+    const sidebar = document.querySelector(
+      'nav[aria-label="Sidebar"], [aria-label="Sidebar"]'
+    );
+    if (!sidebar) return;
+
+    if (injectSidebarNew(sidebar)) return;
+    injectSidebarOld(sidebar);
+  }
+
+  // Locate a top-level sidebar nav item (New, Chats, Projects...) by its label
+  // in the newer interface, where each is a <button data-row-main-button>.
+  function findSidebarNavButton(sidebar, label) {
+    const buttons = sidebar.querySelectorAll("button[data-row-main-button]");
+    for (const b of buttons) {
+      const span = b.querySelector("span.truncate, span.min-w-0.truncate");
+      if (span && span.textContent.trim() === label) return b;
+    }
+    return null;
+  }
+
+  // Newer interface: clone the "Chats" nav button so we inherit its row styling,
+  // then drop a "Delete all chats" button in right after it.
+  function injectSidebarNew(sidebar) {
+    const chatsBtn = findSidebarNavButton(sidebar, "Chats");
+    if (!chatsBtn) return false;
+
+    const btn = document.createElement("button");
+    btn.id = "claude-cleaner-sidebar";
+    btn.type = "button";
+    btn.className = chatsBtn.className;
+    btn.setAttribute("aria-label", "Delete all chats");
+    btn.innerHTML = `
+      <span class="df-leading-slot">
+        <span class="claude-cleaner-sidebar-icon flex items-center justify-center">${TRASH_SVG}</span>
+      </span>
+      <span class="flex min-w-0 flex-1 items-center">
+        <span class="min-w-0 truncate">Delete all chats</span>
+      </span>`;
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      deleteAllChats();
+    });
+
+    chatsBtn.after(btn);
+    return true;
+  }
+
+  // Older interface: the nav items are <a aria-label="..."> inside a
+  // .flex.flex-col.px-2 container; append a matching link.
+  function injectSidebarOld(sidebar) {
+    const chatsLink = sidebar.querySelector('a[aria-label="Chats"]');
+    if (!chatsLink) return false;
     const navContainer = chatsLink.closest(".flex.flex-col.px-2");
-    if (!navContainer) return;
+    if (!navContainer) return false;
 
     const wrapper = document.createElement("div");
     wrapper.id = "claude-cleaner-sidebar";
@@ -544,6 +714,7 @@
 
     wrapper.appendChild(link);
     navContainer.appendChild(wrapper);
+    return true;
   }
 
   // --- styles ---
@@ -576,6 +747,22 @@
       }
       .claude-cleaner-overlay-text{
         color:#fff;font-size:18px;font-weight:600;
+        max-width:440px;text-align:center;line-height:1.4;padding:0 24px;
+      }
+      .claude-cleaner-overlay-sub{
+        color:#bbb;font-size:14px;font-weight:400;line-height:1.5;margin-top:14px;
+      }
+      .claude-cleaner-overlay-sub p{
+        margin:0 0 10px;
+      }
+      .claude-cleaner-overlay-sub p:last-child{
+        margin-bottom:0;
+      }
+      #claude-cleaner-sidebar .claude-cleaner-sidebar-icon{
+        color:rgb(221,83,83);
+      }
+      #claude-cleaner-sidebar .claude-cleaner-sidebar-icon svg{
+        width:18px;height:18px;
       }
       #claude-cleaner-choice{
         position:fixed;inset:0;z-index:10000;
@@ -641,11 +828,11 @@
   // Auto-run if redirected from another page
   const autorunParam = new URLSearchParams(window.location.search).get("claude-cleaner-autorun");
   if (autorunParam === "keep-starred" || autorunParam === "all") {
-    history.replaceState(null, "", "/recents");
+    history.replaceState(null, "", window.location.pathname);
     setTimeout(() => deleteAllChats(autorunParam), 1500);
   } else if (autorunParam === "1") {
     // Legacy support
-    history.replaceState(null, "", "/recents");
+    history.replaceState(null, "", window.location.pathname);
     setTimeout(() => deleteAllChats("keep-starred"), 1500);
   }
 
