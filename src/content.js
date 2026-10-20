@@ -41,7 +41,7 @@
   function isNewInterface() {
     return (
       !!document.querySelector("[data-sidebar-group-label]") ||
-      !!document.querySelector("button[data-row-main-button]") ||
+      !!document.querySelector("[data-row-main-button]") ||
       !!document.querySelector('header[data-testid="page-header"]')
     );
   }
@@ -457,12 +457,56 @@
     return selectedCount;
   }
 
-  function findToolbarDeleteButton() {
-    return (
-      document.querySelector('button[aria-label^="Delete"][aria-label*="selected"]') ||
-      findButtonByText("Delete") ||
-      null
+  // Our own injected controls also say "Delete", so never treat them as
+  // Claude's bulk-delete button.
+  function isOwnElement(el) {
+    return !!el.closest(
+      "#claude-cleaner-btn, #claude-cleaner-sidebar, #claude-cleaner-overlay, [class^='claude-cleaner']"
     );
+  }
+
+  function isVisible(el) {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+
+  // The bulk-delete control has changed shape across redesigns: a text button
+  // ("Delete"), a counted label ("Delete 3 chats"), an icon-only button with an
+  // aria-label, or a data-testid'd control. Check each, most specific first.
+  function findToolbarDeleteButton() {
+    const candidates = Array.from(
+      document.querySelectorAll('button, [role="button"]')
+    ).filter((el) => !isOwnElement(el) && isVisible(el) && !el.disabled);
+
+    const label = (el) => (el.getAttribute("aria-label") || "").trim();
+    const text = (el) => el.textContent.trim();
+    const testid = (el) => (el.getAttribute("data-testid") || "").toLowerCase();
+
+    const tests = [
+      (el) => /^Delete\b/i.test(label(el)) && /selected/i.test(label(el)),
+      (el) => testid(el).includes("delete") && /bulk|selected|selection/.test(testid(el)),
+      (el) => text(el) === "Delete",
+      (el) => /^Delete\b/i.test(label(el)) && !/all chats/i.test(label(el)),
+      (el) => /^Delete \d+/i.test(text(el)) || /^Delete \(\d+\)/i.test(text(el)),
+      (el) => /^Delete\b/i.test(text(el)) && !/all chats/i.test(text(el)),
+    ];
+    for (const test of tests) {
+      const match = candidates.find(test);
+      if (match) return match;
+    }
+    return null;
+  }
+
+  // Poll briefly: the selection toolbar can render a beat after the last
+  // checkbox is ticked.
+  async function waitForToolbarDeleteButton(timeoutMs = 3000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const btn = findToolbarDeleteButton();
+      if (btn) return btn;
+      await sleep(200);
+    }
+    return null;
   }
 
   // Open Claude's native delete confirmation for the current selection, then
@@ -470,8 +514,18 @@
   // selecting the right chats) but the actual destructive confirmation is left
   // for the user to click.
   async function deleteSelected() {
-    const toolbarDelete = findToolbarDeleteButton();
+    const toolbarDelete = await waitForToolbarDeleteButton();
     if (!toolbarDelete) {
+      console.warn(
+        "Claude Cleaner: no bulk-delete button found. Visible buttons:",
+        Array.from(document.querySelectorAll('button, [role="button"]'))
+          .filter((el) => !isOwnElement(el) && isVisible(el))
+          .map((el) => ({
+            text: el.textContent.trim().slice(0, 40),
+            ariaLabel: el.getAttribute("aria-label"),
+            testid: el.getAttribute("data-testid"),
+          }))
+      );
       updateOverlay("Delete button not found");
       await sleep(2000);
       return false;
@@ -644,7 +698,7 @@
   // Locate a top-level sidebar nav item (New, Chats, Projects...) by its label
   // in the newer interface, where each is a <button data-row-main-button>.
   function findSidebarNavButton(sidebar, label) {
-    const buttons = sidebar.querySelectorAll("button[data-row-main-button]");
+    const buttons = sidebar.querySelectorAll("[data-row-main-button]");
     for (const b of buttons) {
       const span = b.querySelector("span.truncate, span.min-w-0.truncate");
       if (span && span.textContent.trim() === label) return b;
@@ -655,13 +709,27 @@
   // Newer interface: clone the "Chats" nav button so we inherit its row styling,
   // then drop a "Delete all chats" button in right after it.
   function injectSidebarNew(sidebar) {
+    // Older builds of the new interface had a "Chats" nav item; we sit right
+    // after it. Later builds dropped it, so fall back to sitting just above
+    // "More" (or after "Customize").
     const chatsBtn = findSidebarNavButton(sidebar, "Chats");
-    if (!chatsBtn) return false;
+    const moreBtn = sidebar.querySelector('[data-row-main-button][data-nav-item="more"]');
+    const customizeBtn =
+      sidebar.querySelector('[data-row-main-button][data-nav-item="customize"]') ||
+      findSidebarNavButton(sidebar, "Customize");
+    const anchor = chatsBtn || moreBtn || customizeBtn;
+    if (!anchor) return false;
+
+    // Copy classes from a nav item that is itself the whole row (it carries
+    // both the row and main-button styling), so we look like a sibling.
+    const styleSource =
+      [chatsBtn, moreBtn, customizeBtn].find((el) => el && el.hasAttribute("data-row")) ||
+      anchor;
 
     const btn = document.createElement("button");
     btn.id = "claude-cleaner-sidebar";
     btn.type = "button";
-    btn.className = chatsBtn.className;
+    btn.className = styleSource.className;
     btn.setAttribute("aria-label", "Delete all chats");
     btn.innerHTML = `
       <span class="df-leading-slot">
@@ -675,7 +743,10 @@
       deleteAllChats();
     });
 
-    chatsBtn.after(btn);
+    // Nav items are sometimes wrapped in a <div data-row>; insert at row level.
+    const anchorRow = anchor.closest("[data-row]") || anchor;
+    if (anchor === moreBtn) anchorRow.before(btn);
+    else anchorRow.after(btn);
     return true;
   }
 
