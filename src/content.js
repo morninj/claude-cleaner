@@ -381,24 +381,66 @@
     return false;
   }
 
-  async function scrollLoadMore() {
-    const before = getChatItemCount();
-    window.scrollTo(0, document.body.scrollHeight);
-    await sleep(800);
-    return getChatItemCount() > before;
+  // The newer interface scrolls the chat list inside its own panel rather
+  // than the window, so find the nearest scrollable ancestor of the rows.
+  function findScrollContainer() {
+    const link = document.querySelector('a[data-primary="true"][href*="/chat/"]');
+    let el = link && link.parentElement;
+    while (el && el !== document.body) {
+      const style = getComputedStyle(el);
+      if (/(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight) {
+        return el;
+      }
+      el = el.parentElement;
+    }
+    return null;
   }
 
-  async function expandAll() {
-    updateOverlay("Expanding...");
+  function scrollToBottom() {
+    const container = findScrollContainer();
+    if (container) container.scrollTop = container.scrollHeight;
+    window.scrollTo(0, document.documentElement.scrollHeight);
+    // Also bring the last row into view, which reliably trips
+    // intersection-observer based infinite loaders.
+    const links = document.querySelectorAll('a[data-primary="true"][href*="/chat/"]');
+    const last = links[links.length - 1];
+    if (last) last.scrollIntoView({ block: "end" });
+  }
 
-    while (true) {
-      if (clickShowMore()) {
-        await sleep(1200);
-        continue;
-      }
-      const loadedMore = await scrollLoadMore();
-      if (!loadedMore) break;
+  // Wait up to timeoutMs for the chat count to rise above `before`.
+  async function waitForMoreChats(before, timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      await sleep(250);
+      if (getChatItemCount() > before) return true;
     }
+    return false;
+  }
+
+  // Keep scrolling until the list stops growing. Older chats load in pages
+  // and a fetch can be slow, so only stop after several consecutive scrolls
+  // bring in nothing new.
+  async function expandAll() {
+    updateOverlay("Loading chats...");
+    const MAX_IDLE_ROUNDS = 4;
+    let idleRounds = 0;
+
+    while (idleRounds < MAX_IDLE_ROUNDS) {
+      const before = getChatItemCount();
+      if (!clickShowMore()) scrollToBottom();
+
+      if (await waitForMoreChats(before, 2500)) {
+        idleRounds = 0;
+        updateOverlay("Loading chats... (" + getChatItemCount() + " loaded)");
+      } else {
+        idleRounds++;
+      }
+    }
+
+    // Return to the top so the selection toolbar is in view.
+    const container = findScrollContainer();
+    if (container) container.scrollTop = 0;
+    window.scrollTo(0, 0);
   }
 
   // --- selection & deletion ---
